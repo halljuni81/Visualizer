@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Music Visualizer</title>
+<style>
+html, body { margin:0; height:100%; background:#000; overflow:hidden;
+-webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+-webkit-tap-highlight-color:transparent; }
+canvas { display:block; }
+#msg { position:fixed; inset:0; z-index:5; display:flex; flex-direction:column; align-items:center; justify-content:center;
+color:#0f0; font-family:monospace; font-size:20px; text-align:center; padding:20px; gap:20px; }
+#startBtn { background:#0f0; color:#000; border:none; border-radius:10px; padding:18px 36px;
+font-family:monospace; font-size:22px; font-weight:bold; cursor:pointer; touch-action:manipulation; }
+#err { color:#f66; font-size:16px; max-width:90%; }
+.btn { position:fixed; top:12px; z-index:10; background:rgba(0,0,0,0.5);
+color:#0f0; border:1px solid #0f0; border-radius:6px; padding:8px 12px;
+font-family:monospace; font-size:14px; cursor:pointer; opacity:0.6; }
+.btn:hover { opacity:1; }
+#fs { right:12px; }
+#mode { right:130px; }
+</style>
+</head>
+<body>
+<div id="msg">
+<div>Press Start, allow the microphone, then play your music.</div>
+<button id="startBtn">START</button>
+<div id="err"></div>
+</div>
+<button id="mode" class="btn">Mode: Code Rain</button>
+<button id="fs" class="btn">Full screen</button>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const msg = document.getElementById('msg');
+const modeBtn = document.getElementById('mode');
+const fsBtn = document.getElementById('fs');
+let W, H, cx, cy, maxR;
+let analyser, data;
+let mode = 0; // 0 = code rain, 1 = vortex, 2 = cylinder
+const MODE_NAMES = ['Code Rain', 'Vortex', 'Cylinder'];
+
+// ---------- Code rain setup ----------
+const chars = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789'.split('');
+const fontSize = 18;
+let cols, drops, speeds;
+
+// ---------- Vortex setup ----------
+const COUNT = 700;
+let parts = [];
+let spin = 0.02, spinTarget = 0.02, kick = 0, jag = 0;
+let bassAvg = 0, lastHit = 0, direction = 1, bright = 0;
+
+function resize() {
+W = canvas.width = window.innerWidth;
+H = canvas.height = window.innerHeight;
+cx = W / 2; cy = H / 2;
+maxR = Math.hypot(cx, cy);
+cols = Math.floor(W / fontSize);
+drops = Array.from({length: cols}, () => Math.random() * -50);
+speeds = Array(cols).fill(1);
+parts = Array.from({length: COUNT}, () => ({
+angle: Math.random() * Math.PI * 2,
+radius: Math.random() * maxR,
+size: 1 + Math.random() * 2,
+offset: Math.random() * 360
+}));
+ctx.fillStyle = '#000';
+ctx.fillRect(0, 0, W, H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+async function start() {
+try {
+const stream = await navigator.mediaDevices.getUserMedia({
+audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+});
+const ac = new (window.AudioContext || window.webkitAudioContext)();
+const src = ac.createMediaStreamSource(stream);
+analyser = ac.createAnalyser();
+analyser.fftSize = 1024;
+analyser.smoothingTimeConstant = 0.65;
+src.connect(analyser);
+data = new Uint8Array(analyser.frequencyBinCount);
+msg.style.display = 'none';
+draw();
+} catch (e) {
+const err = document.getElementById('err');
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+err.textContent = 'This browser is blocking the microphone because the page is not on a secure link (https). Host the file on a secure link and open it from there.';
+} else {
+err.textContent = 'Microphone blocked or not allowed (' + (e.name || 'error') + '). Allow the microphone for this page in Chrome settings, then reload.';
+}
+}
+}
+const startBtn = document.getElementById('startBtn');
+let starting = false;
+function tryStart(e) {
+if (e) { e.preventDefault(); e.stopPropagation(); }
+if (analyser || starting) return;
+starting = true;
+start().finally(() => { starting = false; });
+}
+startBtn.addEventListener('click', tryStart);
+startBtn.addEventListener('touchend', tryStart);
+
+// ---------- Buttons and keys ----------
+function toggleFullscreen() {
+if (!document.fullscreenElement) {
+const el = document.documentElement;
+(el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+} else {
+(document.exitFullscreen || document.webkitExitFullscreen).call(document);
+}
+}
+function toggleMode() {
+mode = (mode + 1) % MODE_NAMES.length;
+modeBtn.textContent = 'Mode: ' + MODE_NAMES[mode];
+ctx.fillStyle = '#000';
+ctx.fillRect(0, 0, W, H);
+}
+fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
+modeBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleMode(); });
+document.addEventListener('keydown', (e) => {
+if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+if (e.key === 'm' || e.key === 'M') toggleMode();
+});
+
+// ---------- Code rain ----------
+function drawRain() {
+ctx.fillStyle = 'rgba(0,0,0,0.08)';
+ctx.fillRect(0, 0, W, H);
+ctx.font = fontSize + 'px monospace';
+const usable = Math.floor(data.length * 0.7);
+
+for (let i = 0; i < cols; i++) {
+const bin = Math.floor((i / cols) * usable);
+const level = data[bin] / 255;
+speeds[i] = 0.4 + level * 3.2;
+
+let hue;
+if (level < 0.45) {
+hue = 120;
+} else {
+hue = (120 + (level - 0.45) * 2.2 * 360 + performance.now() / 20) % 360;
+}
+const light = 35 + level * 35;
+ctx.fillStyle = 'hsl(' + hue + ',100%,' + light + '%)';
+
+const ch = chars[Math.floor(Math.random() * chars.length)];
+ctx.fillText(ch, i * fontSize, drops[i] * fontSize);
+
+drops[i] += speeds[i];
+if (drops[i] * fontSize > H && Math.random() > 0.96) drops[i] = 0;
+}
+}
+
+// ---------- Vortex ----------
+function drawVortex() {
+let bass = 0;
+for (let i = 1; i < 8; i++) bass += data[i];
+bass = bass / 7 / 255;
+
+let total = 0;
+for (let i = 0; i < data.length; i++) total += data[i];
+const loud = total / data.length / 255;
+
+const now = performance.now();
+if (bass > bassAvg * 1.25 && bass > 0.35 && now - lastHit > 160) {
+lastHit = now;
+direction *= -1;
+spinTarget = direction * (0.03 + bass * 0.12);
+kick = 18 + bass * 40;
+jag = (Math.random() - 0.5) * 1.2;
+bright = 1;
+}
+bassAvg = bassAvg * 0.9 + bass * 0.1;
+
+spin += (spinTarget - spin) * 0.12;
+kick *= 0.88;
+jag *= 0.85;
+bright *= 0.92;
+
+ctx.fillStyle = 'rgba(0,0,0,0.14)';
+ctx.fillRect(0, 0, W, H);
+
+for (let i = 0; i < COUNT; i++) {
+const p = parts[i];
+const speedFactor = 1 + (1 - p.radius / maxR) * 2.5;
+p.angle += (spin * speedFactor) + jag * 0.05;
+
+p.radius -= 0.8 + loud * 2;
+p.radius += kick * 0.05 * (p.radius / maxR);
+
+if (p.radius < 4) {
+p.radius = maxR * (0.7 + Math.random() * 0.3);
+p.angle = Math.random() * Math.PI * 2;
+}
+
+const wobble = Math.sin(p.angle * 5 + now / 200) * jag * 30;
+const r = p.radius + wobble;
+const x = cx + Math.cos(p.angle) * r;
+const y = cy + Math.sin(p.angle) * r;
+
+let hue;
+if (loud + bright * 0.3 < 0.18) {
+hue = 120;
+} else {
+hue = (p.offset + now / 15 + (1 - p.radius / maxR) * 200) % 360;
+}
+const light = 40 + loud * 30 + bright * 20;
+ctx.fillStyle = 'hsl(' + hue + ',100%,' + Math.min(light, 80) + '%)';
+ctx.beginPath();
+ctx.arc(x, y, p.size + bass * 3, 0, Math.PI * 2);
+ctx.fill();
+}
+}
+
+// ---------- Cylinder ----------
+// A floating cylinder of dots. Each ring is tied to a slice of the spectrum:
+// bass at one end, treble at the other. It rolls slowly and surges on beats.
+const RINGS = 28;
+const DOTS = 36;
+let cylRot = 0, cylSpeed = 0.006, cylTilt = 0.35;
+let cylBassAvg = 0, cylLastHit = 0, cylPulse = 0;
+const ringLevel = Array(RINGS).fill(0);
+
+function drawCylinder() {
+const now = performance.now();
+
+// Bass hit detection for a gentle rolling surge
+let bass = 0;
+for (let i = 1; i < 8; i++) bass += data[i];
+bass = bass / 7 / 255;
+if (bass > cylBassAvg * 1.25 && bass > 0.35 && now - cylLastHit > 200) {
+cylLastHit = now;
+cylPulse = 1;
+cylSpeed = 0.006 + bass * 0.03;
+}
+cylBassAvg = cylBassAvg * 0.9 + bass * 0.1;
+cylPulse *= 0.92;
+cylSpeed += (0.006 - cylSpeed) * 0.04;
+cylRot += cylSpeed;
+
+// Solid black background each frame, with a very light trail
+ctx.fillStyle = 'rgba(0,0,0,0.35)';
+ctx.fillRect(0, 0, W, H);
+
+const usable = Math.floor(data.length * 0.7);
+const length = Math.min(W, H * 1.4) * 0.8;
+const radius = Math.min(W, H) * (0.17 + cylPulse * 0.03);
+const tiltCos = Math.cos(cylTilt + Math.sin(now / 4000) * 0.15);
+const tiltSin = Math.sin(cylTilt + Math.sin(now / 4000) * 0.15);
+
+const dotsToDraw = [];
+
+for (let r = 0; r < RINGS; r++) {
+// Each ring listens to its own slice of the music
+const bin = Math.floor((r / RINGS) * usable);
+const target = data[bin] / 255;
+ringLevel[r] += (target - ringLevel[r]) * 0.35;
+const level = ringLevel[r];
+
+// Position along the cylinder's length (centered)
+const along = (r / (RINGS - 1) - 0.5) * length;
+
+// Green when calm, rainbow as this ring peaks
+let hue;
+if (level < 0.4) {
+hue = 120;
+} else {
+hue = (120 + (level - 0.4) * 2.4 * 360 + now / 25 + r * 8) % 360;
+}
+const light = 30 + level * 45;
+const ringRadius = radius * (1 + level * 0.25);
+
+for (let d = 0; d < DOTS; d++) {
+const a = (d / DOTS) * Math.PI * 2 + cylRot + r * 0.05;
+const yy = Math.sin(a) * ringRadius;
+const zz = Math.cos(a) * ringRadius;
+
+// Tilt so we see the cylinder from a slight angle
+const px = along;
+const py = yy * tiltCos - zz * tiltSin;
+const pz = yy * tiltSin + zz * tiltCos;
+
+// Simple perspective
+const persp = 600 / (600 + pz);
+dotsToDraw.push({
+x: cx + px * persp,
+y: cy + py * persp,
+size: (1.5 + level * 3) * persp,
+depth: pz,
+hue: hue,
+light: light * (0.55 + 0.45 * persp)
+});
+}
+}
+
+// Draw far dots first so near dots sit on top
+dotsToDraw.sort((a, b) => b.depth - a.depth);
+for (const p of dotsToDraw) {
+ctx.fillStyle = 'hsl(' + p.hue + ',100%,' + Math.min(p.light, 78) + '%)';
+ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+}
+}
+
+function draw() {
+analyser.getByteFrequencyData(data);
+if (mode === 0) drawRain();
+else if (mode === 1) drawVortex();
+else drawCylinder();
+requestAnimationFrame(draw);
+}
+</script>
+</body>
+</html>
